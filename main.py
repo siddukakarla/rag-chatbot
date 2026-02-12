@@ -10,95 +10,86 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-# ---------- Streamlit Config ----------
-st.set_page_config(page_title="RAG Chatbot", layout="wide")
-st.header("📄 RAG PDF Chatbot")
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
+st.header("My First Chatbot")
 
-# ---------- Load OpenAI Key from Streamlit Secrets ----------
-
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-
-
-# ---------- Sidebar ----------
 with st.sidebar:
-    st.title("Upload Document")
-    file = st.file_uploader("Upload a PDF file", type="pdf")
+    st.title("Your Documents")
+    file = st.file_uploader("Upload a PDF file and start asking questions", type="pdf")
 
-
-# ---------- Process PDF ----------
+#Extract contents from the PDF and chunk it
 if file is not None:
-
-    # Extract text safely
-    text = ""
+    #extract text from it
     with pdfplumber.open(file) as pdf:
+        text = ""
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+            text += page.extract_text() + "\n"
+    #st.write(text)
 
-    if not text.strip():
-        st.error("No readable text found in PDF")
-        st.stop()
-
-    # Split into chunks
+    #Split text into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         separators=["\n\n", "\n", ". ", " ", ""],
         chunk_size=1000,
         chunk_overlap=200
     )
     chunks = text_splitter.split_text(text)
+    #st.write(chunks)
 
-    st.success(f"Document processed | Chunks created: {len(chunks)}")
-
-    # Create embeddings
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-
-    # Create FAISS vector store
-    vector_store = FAISS.from_texts(chunks, embeddings)
-
-    # Create retriever
-    retriever = vector_store.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 4}
+    #generating embeddings
+    embeddings = OpenAIEmbeddings(
+        model = "text-embedding-3-small",
+        api_key = OPENAI_API_KEY
     )
 
-    # LLM
+    #store embeddings in vector db
+    vector_store = FAISS.from_texts(chunks,embeddings)
+
+    #get user question
+    user_question = st.text_input("Type your question here")
+
+    #generate answer
+    #question -> embeddings -> similiairty search -> results to LLM -> response (CHAIN)
+
+    def format_docs(docs):
+        return "\n\n".join([doc.page_content for doc in docs])
+
+    retriever = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k":4}
+    )
+
+    #define the LLM and prompts
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.3,
-        max_tokens=800
+        max_tokens=1000,
+        api_key=OPENAI_API_KEY
     )
 
-    # Prompt
+    #provide the prompts
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are a helpful assistant answering questions from a PDF document.\n\n"
-         "Rules:\n"
-         "1. Use ONLY the provided context\n"
-         "2. If answer not in context, say politely 'Not found in document'\n"
-         "3. Give clear and structured answers\n\n"
+         "You are a helpful assistant answering questions about a PDF document.\n\n"
+         "Guidelines:\n"
+         "1. Provide complete, well-explained answers using the context below.\n"
+         "2. Include relevant details, numbers, and explanations to give a thorough response.\n"
+         "3. If the context mentions related information, include it to give fuller picture.\n"
+         "4. Only use information from the provided context - do not use outside knowledge.\n"
+         "5. Summarize long information, ideally in bullets where needed\n"
+         "6. If the information is not in the context, say so politely.\n\n"
          "Context:\n{context}"),
         ("human", "{question}")
     ])
 
-    # Format retrieved docs
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
 
-    # RAG Chain
     chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
     )
 
-    # User Question
-    user_question = st.text_input("Ask a question from the PDF")
-
     if user_question:
-        with st.spinner("Thinking..."):
-            response = chain.invoke(user_question)
-        st.markdown("### Answer")
+        response = chain.invoke(user_question)
         st.write(response)
