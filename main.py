@@ -24,7 +24,9 @@ if file is not None:
     with pdfplumber.open(file) as pdf:
         text = ""
         for page in pdf.pages:
-            text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                text += page.extract_text() + "\n"
     #st.write(text)
 
     #Split text into chunks
@@ -93,3 +95,4 @@ if file is not None:
     if user_question:
         response = chain.invoke(user_question)
         st.write(response)
+
