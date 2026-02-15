@@ -29,108 +29,127 @@ h1 {
 /* Sidebar Styling */
 [data-testid="stSidebar"] {
     background-color: #f0f2f6;
-    padding: 1rem;
 }
 
-/* Input Box Styling */
-div.stTextInput > label {
-    font-weight: bold;
-    color: #4B6CB7;
+/* Fix chat input to bottom and style the send icon area */
+.stChatInput {
+    padding-bottom: 20px;
 }
 
-/* Button Styling */
-button[kind="primary"] {
-    background-color: #4B6CB7;
-    color: white;
-    font-weight: bold;
-}
-
-/* Chat Bubble Style */
-div[data-testid="stMarkdownContainer"] p {
-    font-size: 1rem;
-    line-height: 1.5;
+/* Chat bubble adjustments */
+[data-testid="stChatMessage"] {
+    border-radius: 15px;
+    padding: 10px;
+    margin-bottom: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- HEADER ----------
 st.header("🤖 Assistant Chatbot")
-st.subheader("Upload your document and ask questions!")
+
+# ---------- INITIALIZE SESSION STATE ----------
+# This keeps the chat history visible when the app reruns
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # ---------- SIDEBAR ----------
 with st.sidebar:
     st.markdown("### 📄 Your Documents")
     file = st.file_uploader("Upload a PDF file", type="pdf")
     st.markdown("---")
-    st.markdown("💡 **Tip:** Ask questions about the uploaded PDF. The assistant will answer only based on the document.")
+    if st.button("Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
+    st.markdown("💡 **Tip:** Ask questions about the uploaded PDF.")
 
-# ---------- PDF PROCESSING ----------
+# ---------- PDF PROCESSING & CHAL LOGIC ----------
 if file is not None:
-    # Extract text
-    with pdfplumber.open(file) as pdf:
-        text = ""
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+    # We use a spinner so the user knows the PDF is being processed
+    with st.spinner("Processing PDF..."):
+        # Extract text
+        with pdfplumber.open(file) as pdf:
+            text = ""
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
 
-    # Split text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        separators=["\n\n", "\n", ". ", " ", ""],
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    chunks = text_splitter.split_text(text)
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            separators=["\n\n", "\n", ". ", " ", ""],
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        chunks = text_splitter.split_text(text)
 
-    # Generate embeddings
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
+        # Generate embeddings
+        OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
 
-    # Store in FAISS
-    vector_store = FAISS.from_texts(chunks, embeddings)
+        # Store in FAISS
+        vector_store = FAISS.from_texts(chunks, embeddings)
 
-    # User input
-    user_question = st.text_input("💬 Type your question here")
+        # Prepare retriever
+        retriever = vector_store.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 4}
+        )
 
-    # Prepare retriever
-    def format_docs(docs):
-        return "\n\n".join([doc.page_content for doc in docs])
+        # LLM & Prompt
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.3,
+            max_tokens=1000,
+            api_key=OPENAI_API_KEY
+        )
 
-    retriever = vector_store.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 4}
-    )
+        prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "You are a helpful assistant answering questions about a PDF document.\n\n"
+             "Guidelines:\n"
+             "1. Provide complete, well-explained answers using the context below.\n"
+             "2. Only use information from the provided context.\n"
+             "3. If the information is not in the context, say you don't know.\n\n"
+             "Context:\n{context}"),
+            ("human", "{question}")
+        ])
 
-    # LLM & Prompt
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.3,
-        max_tokens=1000,
-        api_key=OPENAI_API_KEY
-    )
+        def format_docs(docs):
+            return "\n\n".join([doc.page_content for doc in docs])
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are a helpful assistant answering questions about a PDF document.\n\n"
-         "Guidelines:\n"
-         "1. Provide complete, well-explained answers using the context below.\n"
-         "2. Include relevant details, numbers, and explanations to give a thorough response.\n"
-         "3. Only use information from the provided context - do not use outside knowledge.\n"
-         "4. Summarize long information, ideally in bullets where needed.\n"
-         "5. If the information is not in the context, politely say: "
-         "\"I'm sorry, but I don't have enough information to answer that based on the provided context.\"\n\n"
-         "Context:\n{context}"),
-        ("human", "{question}")
-    ])
+        chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
 
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    # ---------- DISPLAY CHAT HISTORY ----------
+    # This renders all previous messages in the UI
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-    # Display response
-    if user_question:
-        response = chain.invoke(user_question)
-        st.markdown(f"**Assistant:** {response}")
+    # ---------- CHAT INPUT AREA ----------
+    # st.chat_input automatically anchors to the bottom and has a built-in enter/send icon
+    if user_question := st.chat_input("Type your question here..."):
+        
+        # 1. Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(user_question)
+        
+        # 2. Add user message to session history
+        st.session_state.messages.append({"role": "user", "content": user_question})
+
+        # 3. Generate response from the RAG chain
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = chain.invoke(user_question)
+                st.markdown(response)
+        
+        # 4. Add assistant response to session history
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
+else:
+    st.info("👋 Please upload a PDF file in the sidebar to begin.")
